@@ -4,14 +4,14 @@
 
 // Flags: --experimental-wasm-eh --experimental-wasm-reftypes --allow-natives-syntax
 
-load("test/mjsunit/wasm/wasm-module-builder.js");
-load("test/mjsunit/wasm/exceptions-utils.js");
+d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
+d8.file.execute("test/mjsunit/wasm/exceptions-utils.js");
 
 // Test the encoding of a thrown exception with a null-ref value.
 (function TestThrowRefNull() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
-  let except = builder.addException(kSig_v_r);
+  let except = builder.addTag(kSig_v_r);
   builder.addFunction("throw_null", kSig_v_v)
       .addBody([
         kExprRefNull, kWasmExternRef,
@@ -26,7 +26,7 @@ load("test/mjsunit/wasm/exceptions-utils.js");
 (function TestThrowCatchRefNull() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
-  let except = builder.addException(kSig_v_r);
+  let except = builder.addTag(kSig_v_r);
   builder.addFunction("throw_catch_null", kSig_i_i)
       .addBody([
         kExprTry, kWasmI32,
@@ -57,7 +57,7 @@ load("test/mjsunit/wasm/exceptions-utils.js");
 (function TestThrowRefParam() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
-  let except = builder.addException(kSig_v_r);
+  let except = builder.addTag(kSig_v_r);
   builder.addFunction("throw_param", kSig_v_r)
       .addBody([
         kExprLocalGet, 0,
@@ -76,7 +76,7 @@ load("test/mjsunit/wasm/exceptions-utils.js");
 (function TestThrowCatchRefParam() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
-  let except = builder.addException(kSig_v_r);
+  let except = builder.addTag(kSig_v_r);
   builder.addFunction("throw_catch_param", kSig_r_r)
       .addBody([
         kExprTry, kWasmExternRef,

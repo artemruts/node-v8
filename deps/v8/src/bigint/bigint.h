@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstring>
 #include <iostream>
+#include <vector>
 
 namespace v8 {
 namespace bigint {
@@ -23,6 +24,8 @@ namespace bigint {
     std::cerr << "Assertion failed: " #cond "\n";     \
     abort();                                          \
   }
+
+extern bool kAdvancedAlgorithmsEnabledInLibrary;
 #else
 #define BIGINT_H_DCHECK(cond) (void(0))
 #endif
@@ -101,7 +104,7 @@ class Digits {
   const digit_t* digits() const { return digits_; }
 
  protected:
-  friend class TemporaryLeftShift;
+  friend class ShiftedDigits;
   digit_t* digits_;
   int len_;
 
@@ -201,21 +204,46 @@ class Platform {
 //
 // The operations are divided into two groups: "fast" (O(n) with small
 // coefficient) operations are exposed directly as free functions, "slow"
-// operations are methods on a {BigIntProcessor} object, which provides
+// operations are methods on a {Processor} object, which provides
 // support for interrupting execution via the {Platform}'s {InterruptRequested}
 // mechanism when it takes too long. These functions return a {Status} value.
 
 // Returns r such that r < 0 if A < B; r > 0 if A > B; r == 0 if A == B.
-int Compare(Digits A, Digits B);
+// Defined here to be inlineable, which helps ia32 a lot (64-bit platforms
+// don't care).
+inline int Compare(Digits A, Digits B) {
+  A.Normalize();
+  B.Normalize();
+  int diff = A.len() - B.len();
+  if (diff != 0) return diff;
+  int i = A.len() - 1;
+  while (i >= 0 && A[i] == B[i]) i--;
+  if (i < 0) return 0;
+  return A[i] > B[i] ? 1 : -1;
+}
+
+// Z := X + Y
+void Add(RWDigits Z, Digits X, Digits Y);
+// Addition of signed integers. Returns true if the result is negative.
+bool AddSigned(RWDigits Z, Digits X, bool x_negative, Digits Y,
+               bool y_negative);
+
+// Z := X - Y. Requires X >= Y.
+void Subtract(RWDigits Z, Digits X, Digits Y);
+// Subtraction of signed integers. Returns true if the result is negative.
+bool SubtractSigned(RWDigits Z, Digits X, bool x_negative, Digits Y,
+                    bool y_negative);
 
 enum class Status { kOk, kInterrupted };
+
+class FromStringAccumulator;
 
 class Processor {
  public:
   // Takes ownership of {platform}.
   static Processor* New(Platform* platform);
 
-  // Use this for any std::unique_ptr holding an instance of BigIntProcessor.
+  // Use this for any std::unique_ptr holding an instance of {Processor}.
   class Destroyer {
    public:
     void operator()(Processor* proc) { proc->Destroy(); }
@@ -225,15 +253,178 @@ class Processor {
 
   // Z := X * Y
   Status Multiply(RWDigits Z, Digits X, Digits Y);
+  // Q := A / B
+  Status Divide(RWDigits Q, Digits A, Digits B);
+  // R := A % B
+  Status Modulo(RWDigits R, Digits A, Digits B);
+
+  // {out_length} initially contains the allocated capacity of {out}, and
+  // upon return will be set to the actual length of the result string.
+  Status ToString(char* out, int* out_length, Digits X, int radix, bool sign);
+
+  Status FromString(RWDigits Z, FromStringAccumulator* accumulator);
 };
 
+inline int AddResultLength(int x_length, int y_length) {
+  return std::max(x_length, y_length) + 1;
+}
+inline int AddSignedResultLength(int x_length, int y_length, bool same_sign) {
+  return same_sign ? AddResultLength(x_length, y_length)
+                   : std::max(x_length, y_length);
+}
+inline int SubtractResultLength(int x_length, int y_length) { return x_length; }
+inline int SubtractSignedResultLength(int x_length, int y_length,
+                                      bool same_sign) {
+  return same_sign ? std::max(x_length, y_length)
+                   : AddResultLength(x_length, y_length);
+}
 inline int MultiplyResultLength(Digits X, Digits Y) {
   return X.len() + Y.len();
 }
+constexpr int kBarrettThreshold = 13310;
+inline int DivideResultLength(Digits A, Digits B) {
+#if V8_ADVANCED_BIGINT_ALGORITHMS
+  BIGINT_H_DCHECK(kAdvancedAlgorithmsEnabledInLibrary);
+  // The Barrett division algorithm needs one extra digit for temporary use.
+  int kBarrettExtraScratch = B.len() >= kBarrettThreshold ? 1 : 0;
+#else
+  // If this fails, set -DV8_ADVANCED_BIGINT_ALGORITHMS in any compilation unit
+  // that #includes this header.
+  BIGINT_H_DCHECK(!kAdvancedAlgorithmsEnabledInLibrary);
+  constexpr int kBarrettExtraScratch = 0;
+#endif
+  return A.len() - B.len() + 1 + kBarrettExtraScratch;
+}
+inline int ModuloResultLength(Digits B) { return B.len(); }
+
+int ToStringResultLength(Digits X, int radix, bool sign);
+// In DEBUG builds, the result of {ToString} will be initialized to this value.
+constexpr char kStringZapValue = '?';
+
+// Support for parsing BigInts from Strings, using an Accumulator object
+// for intermediate state.
+
+class ProcessorImpl;
+
+#if defined(__GNUC__) || defined(__clang__)
+// Clang supports this since 3.9, GCC since 5.x.
+#define HAVE_BUILTIN_MUL_OVERFLOW 1
+#else
+#define HAVE_BUILTIN_MUL_OVERFLOW 0
+#endif
+
+// A container object for all metadata required for parsing a BigInt from
+// a string.
+// Aggressively optimized not to waste instructions for small cases, while
+// also scaling transparently to huge cases.
+// Defined here in the header so that {ConsumeChar} can be inlined.
+class FromStringAccumulator {
+ public:
+  // {max_digits} is only used for refusing to grow beyond a given size
+  // (see "Step 1" below). Does not cause pre-allocation, so feel free to
+  // specify a large maximum.
+  // TODO(jkummerow): The limit applies to the number of intermediate chunks,
+  // whereas the final result will be slightly smaller (depending on {radix}).
+  // So setting max_digits=N here will, for sufficiently large N, not actually
+  // allow parsing BigInts with N digits. We can fix that if/when anyone cares.
+  FromStringAccumulator(int radix, int max_digits)
+      : radix_(radix),
+#if !HAVE_BUILTIN_MUL_OVERFLOW
+        max_multiplier_((~digit_t{0}) / radix),
+#endif
+        max_digits_(max_digits),
+        limit_digit_(radix < 10 ? radix : 10),
+        limit_alpha_(radix > 10 ? radix - 10 : 0) {
+  }
+
+  ~FromStringAccumulator() {
+    delete parts_;
+    delete multipliers_;
+  }
+
+  // Step 1: Call this method repeatedly to read all characters.
+  // This method will return quickly; it does not perform heavy processing.
+  enum class Result { kOk, kInvalidChar, kMaxSizeExceeded };
+  Result ConsumeChar(uint32_t c) {
+    digit_t d;
+    if (c - '0' < limit_digit_) {
+      d = c - '0';
+    } else if ((c | 32u) - 'a' < limit_alpha_) {
+      d = (c | 32u) - 'a' + 10;
+    } else {
+      return Result::kInvalidChar;
+    }
+#if HAVE_BUILTIN_MUL_OVERFLOW
+    digit_t m;
+    if (!__builtin_mul_overflow(multiplier_, radix_, &m)) {
+      multiplier_ = m;
+      part_ = part_ * radix_ + d;
+    }
+#else
+    if (multiplier_ <= max_multiplier_) {
+      multiplier_ *= radix_;
+      part_ = part_ * radix_ + d;
+    }
+#endif
+    else {  // NOLINT(readability/braces)
+      if (!AddPart(multiplier_, part_)) return Result::kMaxSizeExceeded;
+      multiplier_ = radix_;
+      part_ = d;
+    }
+    return Result::kOk;
+  }
+
+  // Step 2: Call this method to determine the required size for the result.
+  int ResultLength() {
+    if (!parts_) return part_ > 0 ? 1 : 0;
+    if (multiplier_ > 1) {
+      multipliers_->push_back(multiplier_);
+      parts_->push_back(part_);
+      // {ResultLength} should be idempotent.
+      multiplier_ = 1;
+      part_ = 0;
+    }
+    return parts_size();
+  }
+
+  // Step 3: Use BigIntProcessor::FromString() to retrieve the result into an
+  // {RWDigits} struct allocated for the size returned by step 2.
+
+ private:
+  friend class ProcessorImpl;
+  int parts_size() { return static_cast<int>(parts_->size()); }
+
+  bool AddPart(digit_t multiplier, digit_t part) {
+    if (!parts_) {
+      parts_ = new std::vector<digit_t>;
+      multipliers_ = new std::vector<digit_t>;
+    } else if (parts_size() == max_digits_) {
+      return false;
+    }
+    multipliers_->push_back(multiplier);
+    parts_->push_back(part);
+    return true;
+  }
+
+  const digit_t radix_;
+#if !HAVE_BUILTIN_MUL_OVERFLOW
+  const digit_t max_multiplier_;
+#endif
+  // The next part to be added to {parts_}, or the only part when sufficient.
+  digit_t part_{0};
+  digit_t multiplier_{1};
+  const int max_digits_;
+  const uint32_t limit_digit_;
+  const uint32_t limit_alpha_;
+  // Avoid allocating these unless we actually need them.
+  std::vector<digit_t>* parts_{nullptr};
+  std::vector<digit_t>* multipliers_{nullptr};
+};
 
 }  // namespace bigint
 }  // namespace v8
 
 #undef BIGINT_H_DCHECK
+#undef HAVE_BUILTIN_MUL_OVERFLOW
 
 #endif  // V8_BIGINT_BIGINT_H_

@@ -13,9 +13,10 @@
 #include "src/base/platform/elapsed-timer.h"
 #include "src/base/platform/time.h"
 #include "src/common/globals.h"
-#include "src/execution/isolate.h"
 #include "src/logging/counters-definitions.h"
 #include "src/logging/runtime-call-stats.h"
+#include "src/objects/code-kind.h"
+#include "src/objects/fixed-array.h"
 #include "src/objects/objects.h"
 #include "src/utils/allocation.h"
 
@@ -27,6 +28,7 @@ namespace internal {
 // manipulated by name.
 
 class Counters;
+class Isolate;
 
 class StatsTable {
  public:
@@ -240,7 +242,9 @@ class Histogram {
   Counters* counters() const { return counters_; }
 
   // Reset the cached internal pointer.
-  void Reset() { histogram_ = CreateHistogram(); }
+  void Reset(bool create_new = true) {
+    histogram_ = create_new ? CreateHistogram() : nullptr;
+  }
 
  private:
   friend class Counters;
@@ -672,6 +676,7 @@ class Counters : public std::enable_shared_from_this<Counters> {
 #define HT(name, caption, max, res) \
   HistogramTimer* name() { return &name##_; }
   HISTOGRAM_TIMER_LIST(HT)
+  HISTOGRAM_TIMER_LIST_SLOW(HT)
 #undef HT
 
 #define HT(name, caption, max, res) \
@@ -710,6 +715,7 @@ class Counters : public std::enable_shared_from_this<Counters> {
   enum Id {
 #define RATE_ID(name, caption, max, res) k_##name,
     HISTOGRAM_TIMER_LIST(RATE_ID)
+    HISTOGRAM_TIMER_LIST_SLOW(RATE_ID)
     TIMED_HISTOGRAM_LIST(RATE_ID)
 #undef RATE_ID
 #define AGGREGATABLE_ID(name, caption) k_##name,
@@ -782,6 +788,7 @@ class Counters : public std::enable_shared_from_this<Counters> {
 
 #define HT(name, caption, max, res) HistogramTimer name##_;
   HISTOGRAM_TIMER_LIST(HT)
+  HISTOGRAM_TIMER_LIST_SLOW(HT)
 #undef HT
 
 #define HT(name, caption, max, res) TimedHistogram name##_;
@@ -845,15 +852,6 @@ void HistogramTimer::Start() {
 void HistogramTimer::Stop() {
   TimedHistogram::Stop(&timer_, counters()->isolate());
 }
-
-#ifdef V8_RUNTIME_CALL_STATS
-RuntimeCallTimerScope::RuntimeCallTimerScope(Isolate* isolate,
-                                             RuntimeCallCounterId counter_id) {
-  if (V8_LIKELY(!TracingFlags::is_runtime_stats_enabled())) return;
-  stats_ = isolate->counters()->runtime_call_stats();
-  stats_->Enter(&timer_, counter_id);
-}
-#endif  // defined(V8_RUNTIME_CALL_STATS)
 
 }  // namespace internal
 }  // namespace v8

@@ -15,9 +15,12 @@
 
 namespace v8 {
 
+class Array;
 class Context;
 class Data;
 class Isolate;
+template <typename T>
+class Local;
 
 namespace internal {
 
@@ -146,6 +149,7 @@ enum ExternalPointerTag : uint64_t {
   kForeignForeignAddressTag = 0x01f7000000000000,        // 0b000000111110111
   kNativeContextMicrotaskQueueTag = 0x01fb000000000000,  // 0b000000111111011
   kEmbedderDataSlotPayloadTag = 0x01fd000000000000,      // 0b000000111111101
+  kCodeEntryPointTag = 0x01fe000000000000,               // 0b000000111111110
 };
 
 constexpr uint64_t kExternalPointerTagMask = 0xffff000000000000;
@@ -504,6 +508,15 @@ V8_INLINE void PerformCastCheck(T* data) {
 class BackingStoreBase {};
 
 }  // namespace internal
+
+V8_EXPORT bool CopyAndConvertArrayToCppBufferInt32(Local<Array> src,
+                                                   int32_t* dst,
+                                                   uint32_t max_length);
+
+V8_EXPORT bool CopyAndConvertArrayToCppBufferFloat64(Local<Array> src,
+                                                     double* dst,
+                                                     uint32_t max_length);
+
 }  // namespace v8
 
 #endif  // INCLUDE_V8_INTERNAL_H_

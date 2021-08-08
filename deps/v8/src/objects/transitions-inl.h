@@ -5,13 +5,11 @@
 #ifndef V8_OBJECTS_TRANSITIONS_INL_H_
 #define V8_OBJECTS_TRANSITIONS_INL_H_
 
-#include "src/ic/handler-configuration-inl.h"
 #include "src/objects/fixed-array-inl.h"
 #include "src/objects/maybe-object-inl.h"
 #include "src/objects/slots.h"
 #include "src/objects/smi.h"
 #include "src/objects/transitions.h"
-#include "src/snapshot/deserializer.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -162,7 +160,7 @@ bool TransitionArray::GetTargetIfExists(int transition_number, Isolate* isolate,
   // transition.
   if (raw.IsSmi()) {
     DCHECK(isolate->has_active_deserializer());
-    DCHECK_EQ(raw.ToSmi(), Deserializer::uninitialized_field_value());
+    DCHECK_EQ(raw.ToSmi(), Smi::uninitialized_deserialization_value());
     return false;
   }
   if (raw->GetHeapObjectIfStrong(&heap_object) &&
@@ -193,8 +191,9 @@ int TransitionArray::SearchName(Name name, int* out_insertion_index) {
 }
 
 TransitionsAccessor::TransitionsAccessor(Isolate* isolate, Map map,
-                                         DisallowGarbageCollection* no_gc)
-    : isolate_(isolate), map_(map), concurrent_access_(false) {
+                                         DisallowGarbageCollection* no_gc,
+                                         bool concurrent_access)
+    : isolate_(isolate), map_(map), concurrent_access_(concurrent_access) {
   Initialize();
   USE(no_gc);
 }
